@@ -53,14 +53,14 @@ class StemEngine {
                 .setTransferMode(AudioTrack.MODE_STREAM)
                 .setPerformanceMode(AudioTrack.PERFORMANCE_MODE_LOW_LATENCY)
                 .build()
-            track.setVolume(1.0f, 1.0f)
+            track.setVolume(1.0f)
             Stem(meta, pcm, track)
         }
     }
 
     fun setVolume(stemName: String, v: Float) {
         stems.find { it.meta.name == stemName }?.let {
-            try { it.track.setVolume(v, v) } catch (_: Exception) { }
+            try { it.track.setVolume(v) } catch (_: Exception) { }
         }
     }
 

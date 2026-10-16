@@ -93,7 +93,7 @@ class ClickEngine {
                 if (wait <= 0) {
                     if (enabled) {
                         try {
-                            track?.setVolume(volume, volume)
+                            track?.setVolume(volume)
                             val buf = clickBuffer(i % beatsPerBar == 0)
                             track?.write(buf, 0, buf.size)
                         } catch (_: Exception) {
