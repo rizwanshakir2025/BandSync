@@ -146,7 +146,7 @@ object SessionManager {
     fun renameSong(id: String, newName: String) {
         val dir = File(songsDir(), id)
         val old = Song.load(dir) ?: return
-        Song.saveMeta(dir, newName.trim().ifEmpty { old.name }, old.bpm, old.beatsPerBar)
+        Song.saveMeta(dir, newName.trim().ifEmpty { old.name }, old.nativeBpm, old.beatsPerBar)
         refreshSongs()
     }
 
