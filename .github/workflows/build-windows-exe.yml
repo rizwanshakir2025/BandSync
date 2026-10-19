@@ -1,0 +1,41 @@
+name: Build Windows EXE
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'bandsync-host/**'
+      - '.github/workflows/build-windows-exe.yml'
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install -r bandsync-host/requirements.txt pyinstaller
+
+      - name: Build EXE with PyInstaller
+        run: |
+          pyinstaller --onefile --windowed --name BandSync-Host `
+            --hidden-import mido.backends.rtmidi `
+            bandsync-host/bandsync_host.py `
+            --distpath dist --workpath build
+
+      - name: Stage portable folder
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path portable | Out-Null
+          Copy-Item dist/BandSync-Host.exe portable/
+          Copy-Item -Recurse bandsync-host/songs portable/songs
+          Copy-Item bandsync-host/README.md portable/README.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bandsync-windows-exe
+          path: portable/

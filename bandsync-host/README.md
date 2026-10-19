@@ -49,6 +49,12 @@ tempo map), so it seeks straight onto the moving timeline.
 
 ## Setup (Windows)
 
+**Easiest:** grab `BandSync-Host.exe` from the repo's Actions artifacts
+(`bandsync-windows-exe`) — it's portable, no Python needed. Unzip it next
+to its `songs/` folder and double-click. Then continue at step 2.
+
+Or run from source:
+
 1. **Install Python 3.11+** from python.org (tick "Add python.exe to PATH").
 2. **Install loopMIDI** (free, Tobias Erichsen) and create a port, e.g.
    `BandSync Clock`. Leave loopMIDI running.

@@ -36,6 +36,18 @@ from songs import load_songs
 HORIZON_MS = 1200  # phones schedule the downbeat this far ahead
 
 
+def base_dir():
+    """Folder the app lives in — next to the .exe when frozen with
+    PyInstaller, next to this file when run from source."""
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+def songs_dir():
+    return os.path.join(base_dir(), "songs")
+
+
 def load_tempo_map(path):
     """Parse a Standard MIDI File's tempo track → [(beat, bpm)].
 
@@ -264,7 +276,7 @@ def run_gui(args):
         midi_ports = []
 
     host = BandSyncHost(args.name, log_fn=lambda s: None)
-    songs = load_songs(os.path.join(os.path.dirname(os.path.abspath(__file__)), "songs"))
+    songs = load_songs(songs_dir())
 
     root = tk.Tk()
     root.title("BandSync Host (PC)")
@@ -469,7 +481,7 @@ def run_headless(args):
         print(f"[host] {s}", flush=True)
 
     host = BandSyncHost(args.name, log_fn=log)
-    songs = load_songs(os.path.join(os.path.dirname(os.path.abspath(__file__)), "songs"))
+    songs = load_songs(songs_dir())
     host.song = next((s for s in songs if s["id"] == "demo_groove_100"),
                      {"id": "demo_groove_100", "name": "Demo Groove 100 BPM",
                       "nativeBpm": 100.0, "beatsPerBar": 4, "stemNames": []})
