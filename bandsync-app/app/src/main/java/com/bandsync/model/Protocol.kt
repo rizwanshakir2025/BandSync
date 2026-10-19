@@ -1,5 +1,6 @@
 package com.bandsync.model
 
+import org.json.JSONArray
 import org.json.JSONObject
 
 /**
