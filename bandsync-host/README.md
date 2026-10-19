@@ -16,8 +16,36 @@ plays its own stems + click mix, synced to the DAW.
    from the top — so they land on the DAW's timeline, not 1.2 s behind it.
 3. On DAW Stop, it broadcasts stop. Phones stop.
 4. Tick intervals are measured continuously; if the DAW's real tempo drifts
-   from the broadcast tempo (>1 BPM), the host warns — restart the DAW
-   transport to re-sync (v1 has no mid-song tempo following).
+   from the expected tempo (>1 BPM), the host warns — restart the DAW
+   transport to re-sync.
+
+## Tempo-track following
+
+Phones can follow the DAW's tempo track, not just a fixed tempo:
+
+1. In Cubase, export the project's tempo track: File → Export → Tempo
+   Track (or export a MIDI file containing the tempo events).
+2. In the host GUI click **Load .mid…** (or `--tempo-map path.mid`).
+   The host parses the tempo events into (beat → BPM) points and shows
+   the count; the start tempo comes from the map, so the Tempo field is
+   only a fallback when no map is loaded.
+3. Every transport broadcast now carries `tempoMap`. Phones precompute the
+   identical beat↔time function and switch the click + per-stem time-stretch
+   exactly on tempo boundaries — all phones stay locked through every
+   tempo change with no mid-song messages.
+4. The drift monitor becomes map-aware: it compares the measured tick
+   tempo against the tempo the map expects *at the DAW's current position*.
+
+Assumption: the MIDI file's bar 1 = the DAW project's bar 1 (the normal
+case when you export the project's own tempo track). Step tempo changes
+come out clean; gradual ramps follow the DAW's own tempo events.
+
+## Late join
+
+A phone that connects while the DAW is already playing doesn't wait for
+the next transport start: the host computes the DAW's current beat from
+its own tick count and sends that phone a catch-up transport (with the
+tempo map), so it seeks straight onto the moving timeline.
 
 ## Setup (Windows)
 
@@ -32,7 +60,8 @@ plays its own stems + click mix, synced to the DAW.
 5. **Songs**: put `song.json` files under `songs/<id>/song.json`
    (same format as the Android app; no WAVs needed on the PC).
    A demo entry is included. The **Tempo** in the app must match the
-   Cubase project tempo.
+   Cubase project tempo (unless a tempo map is loaded — then the map
+   supplies the tempo).
 6. Run: `python bandsync_host.py`
    - Pick the MIDI port (your loopMIDI port), song, tempo → the status
      line shows the port is open.
@@ -61,8 +90,8 @@ accordingly (added in the same commit on the app side).
 
 ## v1 limits
 
-- Tempo is entered in the UI and must match the DAW project; mid-song
-  tempo automation is detected and warned about, not followed.
+- Without a tempo map, tempo is entered in the UI and must match the DAW
+  project; deviations are warned about, not followed mid-song.
 - No song-position seeking mid-play (jump the DAW → restart transport).
 - `loop` is always off for DAW sessions — the DAW owns the timeline.
 - MIDI Clock input jitter (±a few ms) does not affect phone alignment:

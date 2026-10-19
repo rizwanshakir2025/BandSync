@@ -66,7 +66,7 @@ fun HostSetupScreen(onBack: () -> Unit) {
         Text("Song", style = MaterialTheme.typography.titleSmall)
         if (songs.isEmpty()) {
             Text(
-                "No songs on this phone yet — go back and create the demo song first.",
+                "No songs on this phone yet — import one from the Songs library first.",
                 style = MaterialTheme.typography.bodySmall
             )
         }

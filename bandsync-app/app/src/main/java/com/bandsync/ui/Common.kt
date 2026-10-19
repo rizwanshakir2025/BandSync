@@ -16,7 +16,6 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Slider
@@ -54,9 +53,8 @@ fun NoteBanner() {
 }
 
 @Composable
-fun HomeScreen(onHost: () -> Unit, onJoin: () -> Unit) {
+fun HomeScreen(onHost: () -> Unit, onJoin: () -> Unit, onLibrary: () -> Unit) {
     val songs by SessionManager.songs.collectAsState()
-    val busy by SessionManager.busy.collectAsState()
     val ctx = LocalContext.current
 
     Column(
@@ -74,30 +72,14 @@ fun HomeScreen(onHost: () -> Unit, onJoin: () -> Unit) {
         Button(onClick = onHost, Modifier.fillMaxWidth()) { Text("Host a session") }
         Button(onClick = onJoin, Modifier.fillMaxWidth()) { Text("Join a session") }
         HorizontalDivider()
+        Button(onClick = onLibrary, Modifier.fillMaxWidth()) {
+            Text("Songs (${songs.size})")
+        }
         Text(
-            "Songs on this phone (${songs.size})",
-            style = MaterialTheme.typography.titleSmall
+            "Import your stems — WAV, MP3, M4A or FLAC — decoded once at import. " +
+                "Every member needs the same songs on their phone.",
+            style = MaterialTheme.typography.bodySmall
         )
-        songs.forEach { s ->
-            Text(
-                "• ${s.name} — ${s.nativeBpm.toInt()} BPM, ${s.stems.size} stems",
-                style = MaterialTheme.typography.bodySmall
-            )
-        }
-        if (songs.isEmpty()) {
-            if (busy) {
-                CircularProgressIndicator()
-            } else {
-                Button(onClick = { SessionManager.createDemoSong() }) {
-                    Text("Create demo song")
-                }
-            }
-            Text(
-                "No songs yet. Add a folder per song under the app's songs directory " +
-                    "(song.json + one WAV per stem), or generate the demo song to test with two phones.",
-                style = MaterialTheme.typography.bodySmall
-            )
-        }
         Spacer(Modifier.weight(1f))
         val pm = ctx.getSystemService(android.content.Context.POWER_SERVICE) as PowerManager
         if (!pm.isIgnoringBatteryOptimizations(ctx.packageName)) {

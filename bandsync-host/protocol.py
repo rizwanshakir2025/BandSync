@@ -6,13 +6,17 @@ Client -> host:  ping {t1}            (t1 = client wall-clock ms)
 Host -> client:  pong {t1, t2, t3}    (t2 = host recv ms, t3 = host send ms)
 Host -> all:     transport {state, songId, songName, nativeBpm, targetBpm,
                             beatsPerBar, countInBars, loop,
-                            startHostMs, startBeat}
+                            startHostMs, startBeat, tempoMap}
 Either -> other: bye {}
 
 startBeat: song position in quarter-note beats that the DAW/host will be at
 when startHostMs arrives. Phones seek their stems there instead of starting
 from the top — this is what lets a DAW that is already playing stay aligned
 with phones that join its timeline late.
+
+tempoMap: the DAW's tempo track as [{"b": beat, "bpm": bpm}] (optional).
+Phones precompute the identical beat<->time function and follow tempo
+changes with no mid-song messages. Absent/empty = fixed targetBpm.
 """
 
 VERSION = 1
@@ -31,8 +35,9 @@ def pong(t1, t2, t3):
 
 
 def transport_play(song_id, song_name, native_bpm, target_bpm, beats_per_bar,
-                   count_in_bars, loop, start_host_ms, start_beat=0.0):
-    return {
+                   count_in_bars, loop, start_host_ms, start_beat=0.0,
+                   tempo_map=None):
+    msg = {
         "type": "transport",
         "state": "play",
         "songId": song_id,
@@ -45,6 +50,9 @@ def transport_play(song_id, song_name, native_bpm, target_bpm, beats_per_bar,
         "startHostMs": int(start_host_ms),
         "startBeat": float(start_beat),
     }
+    if tempo_map:
+        msg["tempoMap"] = tempo_map
+    return msg
 
 
 def transport_stop():
@@ -69,4 +77,5 @@ def parse_transport(msg):
         "loop": bool(msg.get("loop", False)),
         "startHostMs": int(msg.get("startHostMs", 0) or 0),
         "startBeat": float(msg.get("startBeat", 0.0) or 0.0),
+        "tempoMap": msg.get("tempoMap") or [],
     }

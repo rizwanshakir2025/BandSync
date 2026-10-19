@@ -49,7 +49,8 @@ object Protocol {
         countInBars: Int,
         loop: Boolean,
         startHostMs: Long,
-        startBeat: Double = 0.0
+        startBeat: Double = 0.0,
+        tempoMap: JSONArray? = null
     ) = JSONObject().apply {
         put("type", "transport")
         put("state", "play")
@@ -65,6 +66,9 @@ object Protocol {
         // startHostMs arrives. Phones seek their stems there instead of
         // starting from the top — used by the PC/DAW host.
         put("startBeat", startBeat)
+        // DAW tempo track, [{b: beat, bpm: bpm}], for following tempo
+        // changes. Absent/empty = fixed targetBpm (phone-hosted sessions).
+        if (tempoMap != null) put("tempoMap", tempoMap)
     }
 
     fun transportStop() = JSONObject().apply {
@@ -86,7 +90,8 @@ data class TransportCmd(
     val countInBars: Int = 1,
     val loop: Boolean = true,
     val startHostMs: Long = 0L,
-    val startBeat: Double = 0.0
+    val startBeat: Double = 0.0,
+    val tempoMap: TempoMap? = null
 ) {
     companion object {
         fun parse(msg: JSONObject): TransportCmd? {
@@ -101,7 +106,8 @@ data class TransportCmd(
                 countInBars = msg.optInt("countInBars", 1),
                 loop = msg.optBoolean("loop", true),
                 startHostMs = msg.optLong("startHostMs"),
-                startBeat = msg.optDouble("startBeat", 0.0)
+                startBeat = msg.optDouble("startBeat", 0.0),
+                tempoMap = TempoMap.parse(msg.optJSONArray("tempoMap"))
             )
         }
     }

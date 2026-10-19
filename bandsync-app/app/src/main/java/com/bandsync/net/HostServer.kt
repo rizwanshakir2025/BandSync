@@ -24,6 +24,12 @@ class HostServer(
     private val lock = Any()
     private var nextId = 1
 
+    /**
+     * Built by the session owner: a catch-up transport for a member that
+     * joins mid-song. Invoked on the network thread; may return null.
+     */
+    var lateJoinProvider: (() -> JSONObject?)? = null
+
     @Volatile
     private var running = false
     private var server: ServerSocket? = null
@@ -63,6 +69,12 @@ class HostServer(
                 synchronized(lock) { members[id]?.name = name }
                 synchronized(lock) { members[id]?.conn?.send(Protocol.welcome(hostName)) }
                 listener.onMemberJoined(name)
+                // Late joiner: hand them the current position so they seek
+                // straight onto the moving timeline.
+                val catchUp = try { lateJoinProvider?.invoke() } catch (_: Exception) { null }
+                if (catchUp != null) {
+                    synchronized(lock) { members[id]?.conn?.send(catchUp) }
+                }
             }
             "ping" -> {
                 val t1 = msg.optLong("t1")

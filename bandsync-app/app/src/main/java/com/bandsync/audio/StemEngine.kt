@@ -118,6 +118,78 @@ class StemEngine {
         try { track.pause(); track.flush() } catch (_: Exception) { }
     }
 
+    /**
+     * Tempo-map playback (PC/DAW host). The stretch ratio follows the map:
+     * speed flips exactly on the precomputed boundary frames, so tempo
+     * changes land on the musical section boundary with no re-seek.
+     * Loop is always false with a map (the DAW owns the timeline).
+     */
+    fun playMapped(
+        startWallMs: Long,
+        nativeBpm: Double,
+        tempoMap: com.bandsync.model.TempoMap,
+        startFrame: Int,
+        startBeat: Double
+    ) {
+        stop()
+        stopFlag = false
+        threads = stems.map { stem ->
+            // each stem gets its own copy of the switch schedule
+            val switches = tempoMap.switchesAfter(startBeat, nativeBpm).toMutableList()
+            Thread({
+                val initRatio =
+                    (tempoMap.bpmAt(startBeat) / nativeBpm).toFloat().coerceIn(0.25f, 4.0f)
+                try {
+                    stem.track.playbackParams = PlaybackParams().setSpeed(initRatio)
+                } catch (_: Exception) {
+                    // device ignored speed — stems play at native tempo
+                }
+                while (!stopFlag) {
+                    val wait = startWallMs - System.currentTimeMillis()
+                    if (wait <= 0) break
+                    try { Thread.sleep(wait.coerceAtMost(50)) } catch (_: InterruptedException) { return@Thread }
+                }
+                if (!stopFlag) feedMapped(stem, switches, startFrame)
+            }, "bandsync-stem").apply { isDaemon = true; start() }
+        }
+    }
+
+    private fun feedMapped(
+        stem: Stem,
+        switches: MutableList<Pair<Long, Float>>,
+        startFrame: Int
+    ) {
+        val track = stem.track
+        val pcm = stem.pcm.samples
+        val frames = stem.pcm.frames
+        val chunkFrames = 2048
+        val out = ShortArray(chunkFrames * 2)
+        var pos = startFrame.coerceIn(0, frames)
+        try { track.play() } catch (_: Exception) { return }
+        while (!stopFlag && pos < frames) {
+            while (switches.isNotEmpty() && switches[0].first <= pos) {
+                val ratio = switches.removeAt(0).second.coerceIn(0.25f, 4.0f)
+                try {
+                    track.playbackParams = PlaybackParams().setSpeed(ratio)
+                } catch (_: Exception) { }
+            }
+            val n = minOf(chunkFrames, frames - pos)
+            for (i in 0 until n) {
+                val l = (pcm[(pos + i) * 2] * 32767f).toInt().coerceIn(-32768, 32767).toShort()
+                val r = (pcm[(pos + i) * 2 + 1] * 32767f).toInt().coerceIn(-32768, 32767).toShort()
+                out[i * 2] = l
+                out[i * 2 + 1] = r
+            }
+            try {
+                track.write(out, 0, n * 2)
+            } catch (_: Exception) {
+                break
+            }
+            pos += n
+        }
+        try { track.pause(); track.flush() } catch (_: Exception) { }
+    }
+
     fun stop() {
         stopFlag = true
         threads.forEach { try { it.join(400) } catch (_: Exception) { } }

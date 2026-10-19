@@ -36,6 +36,13 @@ class MidiClockBridge:
         self.playing = False
         self.broadcast_bpm = None  # set by the app when it broadcasts play
         self._drift_warned = False
+        # Absolute tick counter + play-start anchor, for daw_beats().
+        self.total_ticks = 0
+        self._start_tick = 0
+        self._start_base = 0.0
+        # Optional () -> float: expected tempo right now (tempo-map aware).
+        # When set, drift is measured against it instead of broadcast_bpm.
+        self.expected_bpm_fn = None
 
     # -- input -----------------------------------------------------------
 
@@ -46,6 +53,7 @@ class MidiClockBridge:
         if t == "clock":
             with self._lock:
                 self._ticks.append(now)
+                self.total_ticks += 1
                 if len(self._ticks) > 96:
                     del self._ticks[:48]
         elif t == "start" or t == "continue":
@@ -54,6 +62,8 @@ class MidiClockBridge:
                 self._spp_beats = 0.0
                 self._ticks.clear()
                 self._drift_warned = False
+                self._start_tick = self.total_ticks
+                self._start_base = base
                 self.playing = True
             self._on_start(base)
         elif t == "stop":
@@ -85,16 +95,28 @@ class MidiClockBridge:
 
     def check_drift(self):
         """Called periodically by the app while playing. Returns measured bpm
-        when it disagrees with the broadcast tempo, else None."""
-        if not self.playing or self.broadcast_bpm is None or self._drift_warned:
+        when it disagrees with the expected tempo, else None."""
+        if not self.playing or self._drift_warned:
+            return None
+        expected = (self.expected_bpm_fn() if self.expected_bpm_fn
+                    else self.broadcast_bpm)
+        if expected is None:
             return None
         m = self.measured_bpm()
-        if m is not None and abs(m - self.broadcast_bpm) > 1.0:
+        if m is not None and abs(m - expected) > 1.0:
             self._drift_warned = True
             if self._on_drift:
                 self._on_drift(m)
             return m
         return None
+
+    def daw_beats(self):
+        """Song beats elapsed since the current play started
+        (SPP base + ticks/24). None when not playing."""
+        with self._lock:
+            if not self.playing:
+                return None
+            return self._start_base + (self.total_ticks - self._start_tick) / 24.0
 
 
 class _FakeMsg:

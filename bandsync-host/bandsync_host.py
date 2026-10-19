@@ -36,6 +36,36 @@ from songs import load_songs
 HORIZON_MS = 1200  # phones schedule the downbeat this far ahead
 
 
+def load_tempo_map(path):
+    """Parse a Standard MIDI File's tempo track → [(beat, bpm)].
+
+    Export the DAW project's tempo track as .mid (bar 1 = beat 0, same as
+    the project). Beats are quarter-note beats from the file start.
+    """
+    from mido import MidiFile
+    mid = MidiFile(path)
+    ppq = mid.ticks_per_beat
+    events = []
+    for track in mid.tracks:
+        abs_tick = 0
+        for msg in track:
+            abs_tick += msg.time
+            if msg.type == "set_tempo":
+                events.append((abs_tick / ppq, 60_000_000 / msg.tempo))
+    events.sort(key=lambda e: e[0])
+    dedup = []
+    for b, bpm in events:
+        if dedup and abs(dedup[-1][0] - b) < 1e-9:
+            dedup[-1] = (b, bpm)
+        else:
+            dedup.append((b, bpm))
+    if not dedup:
+        raise ValueError(f"No tempo events in {path}")
+    if dedup[0][0] > 0:
+        dedup.insert(0, (0.0, dedup[0][1]))
+    return dedup
+
+
 def local_ip():
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
@@ -62,9 +92,15 @@ class BandSyncHost:
         )
         self.song = None
         self.tempo = 120.0
+        self.tempo_map = None      # [(beat, bpm)] from a MIDI tempo track
+        self.tempo_map_path = ""
+        self._playing = False
+        self._play_bpm = 120.0
         self._events = queue.Queue()
         self._zeroconf = None
         self._drift_thread = None
+        self.server.late_join_provider = self._catch_up
+        self.bridge.expected_bpm_fn = self._expected_bpm
 
     # -- lifecycle ------------------------------------------------------
 
@@ -108,13 +144,39 @@ class BandSyncHost:
                 pass
         self.server.stop()
 
+    # -- tempo map ------------------------------------------------------
+
+    def _map_bpm_at(self, beat):
+        """BPM in effect at song beat `beat` per the loaded tempo map."""
+        bpm = self.tempo_map[0][1]
+        for b, x in self.tempo_map:
+            if b <= beat:
+                bpm = x
+            else:
+                break
+        return bpm
+
+    def _expected_bpm(self):
+        """Tempo the DAW should be at right now (map-aware)."""
+        beats = self.bridge.daw_beats()
+        if self.tempo_map and beats is not None:
+            return self._map_bpm_at(beats)
+        return self._play_bpm
+
+    def _tempo_map_json(self):
+        if not self.tempo_map:
+            return None
+        return [{"b": b, "bpm": bpm} for b, bpm in self.tempo_map]
+
     # -- DAW callbacks (run on the MIDI thread) --------------------------
 
     def _daw_start(self, base_beats):
-        bpm = self.tempo
         if self.song is None:
             self._log("DAW started but no song selected — ignoring")
             return
+        bpm = self._map_bpm_at(base_beats) if self.tempo_map else self.tempo
+        self._play_bpm = bpm
+        self._playing = True
         beat_ms = 60000.0 / bpm
         start_host_ms = time.time() * 1000.0 + HORIZON_MS
         start_beat = base_beats + HORIZON_MS / beat_ms
@@ -128,12 +190,15 @@ class BandSyncHost:
             loop=False,           # DAW owns the timeline; it doesn't loop
             start_host_ms=start_host_ms,
             start_beat=start_beat,
+            tempo_map=self._tempo_map_json(),
         ))
         self.bridge.broadcast_bpm = bpm
         self._events.put(("daw", True))
-        self._log(f"▶ DAW play @ {bpm:.1f} BPM — phones join at beat {start_beat:.2f}")
+        map_note = f" + {len(self.tempo_map)} tempo events" if self.tempo_map else ""
+        self._log(f"▶ DAW play @ {bpm:.1f} BPM — phones join at beat {start_beat:.2f}{map_note}")
 
     def _daw_stop(self):
+        self._playing = False
         self.server.broadcast(protocol.transport_stop())
         self.bridge.broadcast_bpm = None
         self._events.put(("daw", False))
@@ -141,8 +206,34 @@ class BandSyncHost:
 
     def _daw_drift(self, measured):
         self._log(f"⚠ DAW tempo drift: ticks say {measured:.1f} BPM, "
-                  f"broadcast was {self.bridge.broadcast_bpm:.1f}. "
+                  f"expected {self._expected_bpm():.1f}. "
                   f"Restart the DAW transport to re-sync.")
+
+    def _catch_up(self):
+        """Transport for a phone joining mid-song: where the DAW is right
+        now (from its own tick count) plus the horizon. None when idle."""
+        if not self._playing or self.song is None:
+            return None
+        beats_now = self.bridge.daw_beats()
+        if beats_now is None:
+            return None
+        bpm_now = self._map_bpm_at(beats_now) if self.tempo_map else self._play_bpm
+        start_beat = beats_now + HORIZON_MS / (60000.0 / bpm_now)
+        # one refinement: tempo in effect where the phones will actually start
+        bpm = self._map_bpm_at(start_beat) if self.tempo_map else self._play_bpm
+        start_host_ms = time.time() * 1000.0 + HORIZON_MS
+        return protocol.transport_play(
+            song_id=self.song["id"],
+            song_name=self.song["name"],
+            native_bpm=self.song["nativeBpm"],
+            target_bpm=bpm,
+            beats_per_bar=self.song["beatsPerBar"],
+            count_in_bars=0,
+            loop=False,
+            start_host_ms=start_host_ms,
+            start_beat=start_beat,
+            tempo_map=self._tempo_map_json(),
+        )
 
     def panic_stop(self):
         self.server.broadcast(protocol.transport_stop())
@@ -177,7 +268,7 @@ def run_gui(args):
 
     root = tk.Tk()
     root.title("BandSync Host (PC)")
-    root.geometry("560x520")
+    root.geometry("560x560")
 
     log_lines = []
 
@@ -244,8 +335,31 @@ def run_gui(args):
     ttk.Label(frm, text="Tempo (BPM):").grid(row=3, column=0, sticky="w")
     tempo_var = tk.StringVar(value="100")
     ttk.Entry(frm, textvariable=tempo_var, width=10).grid(row=3, column=1, sticky="w")
-    ttk.Label(frm, text="Must match the DAW project tempo.").grid(
+    ttk.Label(frm, text="Used when no tempo map is loaded.").grid(
         row=3, column=2, sticky="w")
+
+    ttk.Label(frm, text="Tempo map:").grid(row=4, column=0, sticky="w")
+    map_var = tk.StringVar(value="none — fixed tempo")
+    ttk.Label(frm, textvariable=map_var, wraplength=260).grid(row=4, column=1, sticky="w")
+    ttk.Button(frm, text="Load .mid…",
+               command=lambda: load_map_dialog()).grid(row=4, column=2)
+
+    def load_map_dialog(path=None):
+        from tkinter import filedialog
+        p = path or filedialog.askopenfilename(
+            title="DAW tempo track",
+            filetypes=[("MIDI files", "*.mid *.midi"), ("All files", "*.*")])
+        if not p:
+            return
+        try:
+            host.tempo_map = load_tempo_map(p)
+            host.tempo_map_path = p
+            first = host.tempo_map[0][1]
+            map_var.set(f"{len(host.tempo_map)} events, starts {first:.1f} BPM")
+            log(f"Tempo map loaded: {len(host.tempo_map)} events from "
+                f"{os.path.basename(p)} — phones will follow the DAW's tempo track.")
+        except Exception as e:  # noqa: BLE001 - report to user
+            log(f"Tempo map failed: {e}")
 
     def apply_selection():
         name = song_var.get()
@@ -254,16 +368,22 @@ def run_gui(args):
             log("No song selected")
             return
         host.song = match
-        try:
-            host.tempo = float(tempo_var.get())
-        except ValueError:
-            log("Tempo must be a number")
-            return
-        log(f"Song: {match['name']} ({match['nativeBpm']:.0f} BPM native, "
-            f"{len(match['stemNames'])} stems) → play at {host.tempo:.1f} BPM")
+        if host.tempo_map:
+            host.tempo = host.tempo_map[0][1]
+            log(f"Song: {match['name']} ({match['nativeBpm']:.0f} BPM native, "
+                f"{len(match['stemNames'])} stems) → tempo follows the map "
+                f"(starts {host.tempo:.1f} BPM)")
+        else:
+            try:
+                host.tempo = float(tempo_var.get())
+            except ValueError:
+                log("Tempo must be a number")
+                return
+            log(f"Song: {match['name']} ({match['nativeBpm']:.0f} BPM native, "
+                f"{len(match['stemNames'])} stems) → play at {host.tempo:.1f} BPM")
 
     ttk.Button(frm, text="Use this song + tempo",
-               command=apply_selection).grid(row=4, column=0, columnspan=3,
+               command=apply_selection).grid(row=5, column=0, columnspan=3,
                                             sticky="ew", pady=4)
     if songs:
         song_var.set(songs[0]["name"])
@@ -272,17 +392,17 @@ def run_gui(args):
     daw_var = tk.StringVar(value="Stopped")
     meas_var = tk.StringVar(value="—")
     mem_var = tk.StringVar(value="none yet")
-    ttk.Label(frm, text="DAW:").grid(row=5, column=0, sticky="w")
+    ttk.Label(frm, text="DAW:").grid(row=6, column=0, sticky="w")
     ttk.Label(frm, textvariable=daw_var, font=("TkDefaultFont", 11, "bold")).grid(
-        row=5, column=1, sticky="w")
-    ttk.Label(frm, text="Measured:").grid(row=6, column=0, sticky="w")
-    ttk.Label(frm, textvariable=meas_var).grid(row=6, column=1, sticky="w")
-    ttk.Label(frm, text="Members:").grid(row=7, column=0, sticky="w")
+        row=6, column=1, sticky="w")
+    ttk.Label(frm, text="Measured:").grid(row=7, column=0, sticky="w")
+    ttk.Label(frm, textvariable=meas_var).grid(row=7, column=1, sticky="w")
+    ttk.Label(frm, text="Members:").grid(row=8, column=0, sticky="w")
     ttk.Label(frm, textvariable=mem_var, wraplength=380).grid(
-        row=7, column=1, columnspan=2, sticky="w")
+        row=8, column=1, columnspan=2, sticky="w")
 
     btn_frm = ttk.Frame(frm)
-    btn_frm.grid(row=8, column=0, columnspan=3, sticky="ew", pady=6)
+    btn_frm.grid(row=9, column=0, columnspan=3, sticky="ew", pady=6)
     ttk.Button(btn_frm, text="Panic: stop all phones",
                command=host.panic_stop).pack(side="left", expand=True, fill="x")
     if args.simulate:
@@ -298,9 +418,13 @@ def run_gui(args):
         host.tempo = float(args.bpm)
 
     log_text = tk.Text(frm, height=12, state="disabled", wrap="word")
-    log_text.grid(row=9, column=0, columnspan=3, sticky="nsew")
-    frm.rowconfigure(9, weight=1)
+    log_text.grid(row=10, column=0, columnspan=3, sticky="nsew")
+    frm.rowconfigure(10, weight=1)
     frm.columnconfigure(1, weight=1)
+
+    # --tempo-map also works with the GUI
+    if args.tempo_map:
+        load_map_dialog(args.tempo_map)
 
     # MIDI input thread
     def midi_loop():
@@ -350,6 +474,11 @@ def run_headless(args):
                      {"id": "demo_groove_100", "name": "Demo Groove 100 BPM",
                       "nativeBpm": 100.0, "beatsPerBar": 4, "stemNames": []})
     host.tempo = float(args.bpm)
+    if args.tempo_map:
+        host.tempo_map = load_tempo_map(args.tempo_map)
+        host.tempo_map_path = args.tempo_map
+        host.tempo = host.tempo_map[0][1]
+        log(f"Tempo map: {len(host.tempo_map)} events from {args.tempo_map}")
     host.start()
     print(f"PORT={host.server.port}", flush=True)
 
@@ -379,6 +508,8 @@ def main():
     ap.add_argument("--name", default="PC",
                     help="host name shown to phones")
     ap.add_argument("--bpm", default="104", help="tempo to broadcast")
+    ap.add_argument("--tempo-map", default="",
+                    help="MIDI file with the DAW tempo track — phones follow it")
     ap.add_argument("--play-after", default="2",
                     help="headless simulate: seconds before DAW play")
     ap.add_argument("--stop-after", default="8",

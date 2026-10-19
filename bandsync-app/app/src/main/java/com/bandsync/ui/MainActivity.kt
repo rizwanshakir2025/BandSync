@@ -23,6 +23,7 @@ sealed interface Screen {
     data object HostSetup : Screen
     data object Join : Screen
     data object Session : Screen
+    data object Library : Screen
 }
 
 class MainActivity : ComponentActivity() {
@@ -54,11 +55,13 @@ fun BandSyncApp() {
             when (screen) {
                 Screen.Home -> HomeScreen(
                     onHost = { screen = Screen.HostSetup },
-                    onJoin = { screen = Screen.Join }
+                    onJoin = { screen = Screen.Join },
+                    onLibrary = { screen = Screen.Library }
                 )
                 Screen.HostSetup -> HostSetupScreen(onBack = { screen = Screen.Home })
                 Screen.Join -> JoinScreen(onBack = { screen = Screen.Home })
                 Screen.Session -> SessionScreen(onLeave = { screen = Screen.Home })
+                Screen.Library -> LibraryScreen(onBack = { screen = Screen.Home })
             }
         }
     }

@@ -29,15 +29,46 @@ that is a platform-stretcher limit, not a bug.
 ## Songs
 
 `<app files>/songs/<song-id>/song.json` + one WAV per stem (16-bit PCM
-recommended; 8/24/32-bit and MP3-style rates are converted on load):
+recommended; 8/24/32-bit and other rates are converted on load):
 
 ```json
 {"name": "My Song", "nativeBpm": 100.0, "beatsPerBar": 4,
  "stems": [{"name": "Kick", "file": "kick.wav"}]}
 ```
 
-The in-app **Create demo song** button synthesizes a 100 BPM demo
-(kick/snare/hats/bass/pad) for two-phone testing.
+## Song library
+
+The home screen's **Songs** button opens the library:
+
+- **Import folder** — pick a folder; every WAV/MP3/M4A/FLAC inside becomes
+  one song's stems. **Import files** — pick the stem files directly.
+- Compressed formats are decoded once at import (Android's built-in
+  decoder) and stored as 16-bit stereo 48 kHz WAV, so the playback engine
+  never changes. You enter the song name and its **native BPM** (the tempo
+  the stems were rendered at) — get this right, it's how the engine locks
+  to the host.
+- List shows name, BPM, stem count and size. **Rename** edits only the
+  display name (the folder id never changes — it's the cross-phone join
+  key). **BPM** fixes the native tempo / beats per bar. **Delete** asks for
+  confirmation and refuses to delete the song that's currently playing.
+
+Every member needs the same songs on their phone; matching is by song id.
+
+## Tempo-map following (PC/DAW host)
+
+When the PC host broadcasts a `tempoMap` (the DAW's tempo track, parsed
+from an exported MIDI file), phones follow it: the click scheduler and the
+per-stem time-stretch switch exactly on the map's tempo boundaries, so all
+phones stay locked through tempo changes with no mid-song messages.
+Step changes are clean; continuous ramps are approximated by the DAW's own
+tempo events. Without a map, the session runs at the single broadcast tempo
+(phone-hosted sessions always work this way).
+
+## Late join
+
+A phone that joins mid-song doesn't wait for the next Play: the host sends
+it a catch-up transport for the current song position (recomputed from the
+host's/DAW's own beat count), so it seeks straight onto the moving timeline.
 
 ## Keep-alive
 

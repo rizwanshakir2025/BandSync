@@ -56,10 +56,10 @@ object WavIo {
 
         val bytesPerSample = bits / 8
         val frameCount = dataSize / (bytesPerSample * channels)
-        val mono = FloatArray(frameCount)
         val d = ByteBuffer.wrap(bytes, dataOffset, dataSize).order(ByteOrder.LITTLE_ENDIAN)
+        val interleaved = FloatArray(frameCount * channels)
+        var p = 0
         for (f in 0 until frameCount) {
-            var acc = 0.0
             for (c in 0 until channels) {
                 val v: Double = when {
                     audioFormat == 3 && bits == 32 -> d.float.toDouble()
@@ -74,11 +74,26 @@ object WavIo {
                     bits == 32 -> d.int / 2147483648.0
                     else -> throw IllegalArgumentException("Unsupported WAV format: ${file.name}")
                 }
-                acc += v
+                interleaved[p++] = v.toFloat()
             }
+        }
+        return convertToStereo48k(interleaved, channels, sampleRate)
+    }
+
+    /**
+     * Downmix (if needed) + resample interleaved float PCM to stereo
+     * 48 kHz — the engine's canonical format. Linear resampling is
+     * fine for stems.
+     */
+    fun convertToStereo48k(interleaved: FloatArray, channels: Int, sampleRate: Int): Pcm {
+        require(channels in 1..8) { "Unsupported channel count: $channels" }
+        val frameCount = interleaved.size / channels
+        val mono = FloatArray(frameCount)
+        for (f in 0 until frameCount) {
+            var acc = 0.0
+            for (c in 0 until channels) acc += interleaved[f * channels + c]
             mono[f] = (acc / channels).toFloat()
         }
-        // resample to 48 kHz (linear is fine for stems)
         val outFrames = if (sampleRate == TARGET_RATE) frameCount
         else (frameCount.toDouble() * TARGET_RATE / sampleRate).roundToInt()
         val stereo = FloatArray(outFrames * 2)

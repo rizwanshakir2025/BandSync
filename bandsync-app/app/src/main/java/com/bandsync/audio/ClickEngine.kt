@@ -106,6 +106,49 @@ class ClickEngine {
         }, "bandsync-click").apply { isDaemon = true; start() }
     }
 
+    /**
+     * Tempo-map click scheduling (PC/DAW host). Each click's wall-clock
+     * time is computed from the shared map, so accents stay glued to the
+     * song's downbeats through tempo changes. No count-in on this path
+     * (the PC host always sends countInBars = 0).
+     */
+    fun startMapped(
+        startWallMs: Long,
+        startBeat: Double,
+        beatsPerBar: Int,
+        totalClicks: Int,
+        tempoMap: com.bandsync.model.TempoMap
+    ) {
+        stop()
+        ensureTrack()
+        stopFlag = false
+        thread = Thread({
+            var k = 0
+            val firstIdx = kotlin.math.ceil(startBeat).toInt()
+            while (!stopFlag && (totalClicks < 0 || k < totalClicks)) {
+                val beat = (firstIdx + k).toDouble()
+                val t = startWallMs + tempoMap.msBetween(startBeat, beat)
+                val wait = t.toLong() - System.currentTimeMillis()
+                if (wait > 10) {
+                    try { Thread.sleep((wait - 5).coerceAtMost(40)) } catch (_: InterruptedException) { break }
+                    continue
+                }
+                if (wait <= 0) {
+                    if (enabled) {
+                        try {
+                            track?.setVolume(volume)
+                            val buf = clickBuffer((firstIdx + k) % beatsPerBar == 0)
+                            track?.write(buf, 0, buf.size)
+                        } catch (_: Exception) {
+                            break
+                        }
+                    }
+                    k++
+                }
+            }
+        }, "bandsync-click").apply { isDaemon = true; start() }
+    }
+
     fun stop() {
         stopFlag = true
         try { thread?.join(400) } catch (_: Exception) { }

@@ -1,12 +1,13 @@
 package com.bandsync.session
 
 import android.content.Context
+import android.net.Uri
 import com.bandsync.audio.ClickEngine
-import com.bandsync.audio.DemoSong
 import com.bandsync.audio.Song
 import com.bandsync.audio.StemEngine
 import com.bandsync.audio.WavIo
 import com.bandsync.model.Protocol
+import com.bandsync.model.TempoMap
 import com.bandsync.model.TransportCmd
 import com.bandsync.net.ClientLink
 import com.bandsync.net.Discovery
@@ -47,7 +48,8 @@ object SessionManager {
     val stemVolumes = MutableStateFlow<Map<String, Float>>(emptyMap())
     val clickEnabled = MutableStateFlow(true)
     val clickVolume = MutableStateFlow(0.8f)
-    val busy = MutableStateFlow(false)
+    /** Non-null while a song import is running. */
+    val importProgress = MutableStateFlow<SongImporter.Progress?>(null)
 
     private var appContext: Context? = null
     private var server: HostServer? = null
@@ -63,6 +65,8 @@ object SessionManager {
     private var beatsPerBar = 4
     private var countInBars = 1
     private var loop = true
+    /** Host wall-clock ms of the last Play's downbeat (startBeat = 0). */
+    private var playStartHostMs = 0L
 
     private fun songsDir(): File {
         val ctx = appContext ?: throw IllegalStateException("No context")
@@ -80,22 +84,6 @@ object SessionManager {
         } catch (_: Exception) { }
     }
 
-    fun createDemoSong() {
-        if (busy.value) return
-        busy.value = true
-        Thread({
-            try {
-                DemoSong.create(songsDir())
-                refreshSongs()
-                setNote("Demo song created — pick it when hosting.")
-            } catch (e: Exception) {
-                setNote("Demo song failed: ${e.message}")
-            } finally {
-                busy.value = false
-            }
-        }, "bandsync-demo").apply { isDaemon = true; start() }
-    }
-
     fun clearNote() {
         uiState.value = uiState.value.copy(note = "")
     }
@@ -104,6 +92,69 @@ object SessionManager {
 
     private fun setNote(t: String) {
         uiState.value = uiState.value.copy(note = t)
+    }
+
+    // ---------------- song library ----------------
+
+    fun startImportTree(ctx: Context, treeUri: Uri, name: String, bpm: Double, bpb: Int) {
+        runImport {
+            SongImporter.importTree(ctx, treeUri, name, bpm, bpb, songsDir()) {
+                importProgress.value = it
+            }
+        }
+    }
+
+    fun startImportFiles(ctx: Context, uris: List<Uri>, name: String, bpm: Double, bpb: Int) {
+        runImport {
+            SongImporter.importFiles(ctx, uris, name, bpm, bpb, songsDir()) {
+                importProgress.value = it
+            }
+        }
+    }
+
+    private fun runImport(block: () -> Song) {
+        if (importProgress.value != null) return
+        importProgress.value = SongImporter.Progress("Starting…", 0, 1)
+        Thread({
+            try {
+                val song = block()
+                refreshSongs()
+                setNote("Imported \u201c${song.name}\u201d \u2014 ${song.stems.size} stems.")
+            } catch (e: Exception) {
+                setNote("Import failed: ${e.message}")
+            } finally {
+                importProgress.value = null
+            }
+        }, "bandsync-import").apply { isDaemon = true; start() }
+    }
+
+    /**
+     * Delete a song. Returns false (with a note) when it's the song
+     * currently playing in a live session.
+     */
+    fun deleteSong(id: String): Boolean {
+        if (uiState.value.status == "live" && currentSong?.id == id) {
+            setNote("Can't delete the song that's playing.")
+            return false
+        }
+        val dir = File(songsDir(), id)
+        if (dir.exists()) dir.deleteRecursively()
+        refreshSongs()
+        return true
+    }
+
+    fun renameSong(id: String, newName: String) {
+        val dir = File(songsDir(), id)
+        val old = Song.load(dir) ?: return
+        Song.saveMeta(dir, newName.trim().ifEmpty { old.name }, old.bpm, old.beatsPerBar)
+        refreshSongs()
+    }
+
+    fun updateSongMeta(id: String, bpm: Double, beatsPerBar: Int) {
+        val dir = File(songsDir(), id)
+        val old = Song.load(dir) ?: return
+        Song.saveMeta(dir, old.name, bpm, beatsPerBar)
+        refreshSongs()
     }
 
     // ---------------- host ----------------
@@ -136,6 +187,9 @@ object SessionManager {
                     uiState.value = uiState.value.copy(status = "error", note = "Could not open server socket.")
                     return@Thread
                 }
+                // Late joiners get a catch-up transport for the current
+                // position instead of waiting for the next Play.
+                srv.lateJoinProvider = { buildCatchUpTransport() }
                 discovery = Discovery(appContext!!).also { it.register(hostName, srv.port) }
                 uiState.value = UiState(
                     status = "live", role = "host", selfName = hostName,
@@ -159,6 +213,7 @@ object SessionManager {
         val song = currentSong ?: return
         if (uiState.value.role != "host") return
         val startHostMs = System.currentTimeMillis() + 1500
+        playStartHostMs = startHostMs
         server?.broadcast(
             Protocol.transportPlay(
                 song.id, song.name, nativeBpm, targetBpm,
@@ -167,6 +222,27 @@ object SessionManager {
         )
         startEngines(startHostMs, countInBars, loop)
         uiState.value = uiState.value.copy(isPlaying = true)
+    }
+
+    /**
+     * Catch-up transport for a member joining mid-song: where the song is
+     * *right now*, plus a small horizon. Null when nothing is playing (or
+     * the song already ended without looping).
+     */
+    private fun buildCatchUpTransport(): org.json.JSONObject? {
+        val song = currentSong ?: return null
+        if (!uiState.value.isPlaying || uiState.value.role != "host") return null
+        val now = System.currentTimeMillis()
+        val beatMs = 60000.0 / targetBpm
+        val elapsedBeats = (now - playStartHostMs) / beatMs
+        if (!loop && elapsedBeats >= stems.songBeats(nativeBpm)) return null
+        val horizon = 800L
+        return Protocol.transportPlay(
+            song.id, song.name, nativeBpm, targetBpm, beatsPerBar,
+            countInBars = 0, loop = loop,
+            startHostMs = now + horizon,
+            startBeat = elapsedBeats + horizon / beatMs
+        )
     }
 
     fun hostStop() {
@@ -243,7 +319,7 @@ object SessionManager {
         stems.stemNames.forEach { vols.putIfAbsent(it, 1.0f) }
         stemVolumes.value = vols
         val startLocal = clock.hostToLocal(cmd.startHostMs)
-        startEngines(startLocal, cmd.countInBars, cmd.loop, cmd.startBeat)
+        startEngines(startLocal, cmd.countInBars, cmd.loop, cmd.startBeat, cmd.tempoMap)
         uiState.value = uiState.value.copy(
             isPlaying = true, songName = cmd.songName, songId = cmd.songId, targetBpm = cmd.targetBpm
         )
@@ -255,9 +331,23 @@ object SessionManager {
         startWallMs: Long,
         countIn: Int,
         loopMode: Boolean,
-        startBeat: Double = 0.0
+        startBeat: Double = 0.0,
+        tempoMap: TempoMap? = null
     ) {
         stopEngines()
+        if (tempoMap != null) {
+            // PC/DAW host path: tempo map drives everything. Count-in is
+            // always 0 and loop always false on this path.
+            val startFrame = tempoMap.framesForBeat(startBeat, nativeBpm).toInt()
+            val songBeats = stems.songBeats(nativeBpm)
+            val totalClicks = (songBeats - startBeat).toInt().coerceAtLeast(1)
+            stemVolumes.value.forEach { (n, v) -> stems.setVolume(n, v) }
+            click.enabled = clickEnabled.value
+            click.volume = clickVolume.value
+            stems.playMapped(startWallMs, nativeBpm, tempoMap, startFrame, startBeat)
+            click.startMapped(startWallMs, startBeat, beatsPerBar, totalClicks, tempoMap)
+            return
+        }
         val beatMs = 60000.0 / targetBpm
         val ratio = (targetBpm / nativeBpm).toFloat()
         // Seek into the timeline (PC/DAW host): stems start at the frame the

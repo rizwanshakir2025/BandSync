@@ -74,6 +74,9 @@ class HostServer:
         self._running = False
         self._sock = None
         self.port = -1
+        # Optional: () -> msg | None. Called when a member says hi; the
+        # returned message goes ONLY to that peer (late-join catch-up).
+        self.late_join_provider = None
 
     def start(self):
         self._running = True
@@ -105,6 +108,16 @@ class HostServer:
             peer.send(protocol.welcome(self._host_name))
             if self._on_join:
                 self._on_join(peer.name)
+            # Late joiner: hand them the current position so they seek
+            # straight onto the moving timeline.
+            catch_up = None
+            if self.late_join_provider:
+                try:
+                    catch_up = self.late_join_provider()
+                except Exception:
+                    catch_up = None
+            if catch_up is not None:
+                peer.send(catch_up)
         elif mtype == "ping":
             t1 = msg.get("t1", 0)
             t2 = int(time.time() * 1000)
